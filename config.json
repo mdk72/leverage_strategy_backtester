@@ -1,0 +1,15 @@
+{
+  "base_ticker": "QQQ",
+  "add_tickers": "TQQQ",
+  "initial_capital": 10000,
+  "start_date": "2020-01-01",
+  "end_date": "2025-12-01",
+  "sell_mode": "close",
+  "cash_buffer_pct": 0,
+  "max_buys_day": 0,
+  "max_buys_week": 0,
+  "force_buy_days": 30,
+  "use_ma_filter": false,
+  "ma_mode": "defensive",
+  "ma_period": 200
+}
