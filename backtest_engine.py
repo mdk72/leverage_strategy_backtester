@@ -48,9 +48,12 @@ class Backtester:
         self.daily_stats = []
         
         # Stats
-        self.step_buy_counts = {}
-        self.step_profits = {}
-        self.step_profit_amounts = {}
+        # Stats
+        # Structure: { step_idx: { 'DROP': {'count':0, 'profits':[], 'amts':[]}, 'FORCE': ... } }
+        self.step_stats = defaultdict(lambda: {
+            'DROP': {'count': 0, 'profits': [], 'amts': []},
+            'FORCE': {'count': 0, 'profits': [], 'amts': []}
+        })
 
     def check_buy_limits(self, current_date):
         """
@@ -284,8 +287,10 @@ class Backtester:
                     self.holdings[lot['ticker']] -= lot['shares']
                     
                     # Record Per-Step Profit
-                    self.step_profits.setdefault(step_idx, []).append(profit)
-                    self.step_profit_amounts.setdefault(step_idx, []).append(profit_amt)
+                    # Record Per-Step Profit
+                    entry_type = lot.get('entry_type', 'DROP') # Default to DROP for compatibility
+                    self.step_stats[step_idx][entry_type]['profits'].append(profit)
+                    self.step_stats[step_idx][entry_type]['amts'].append(profit_amt)
                     
                     # 동적 리벨런싱: 현금 비중을 목표 %로 유지
                     rebalance_note = ""
@@ -324,7 +329,7 @@ class Backtester:
                     
                     self.trade_log.append({
                         "Date": date,
-                        "Action": "SELL (Profit)",
+                        "Action": f"SELL (Profit/{entry_type})", # Distinguished Action
                         "Ticker": lot['ticker'],
                         "Shares": lot['shares'],
                         "Price": exec_price,
@@ -389,7 +394,8 @@ class Backtester:
                                         'price': buy_price,
                                         'step_idx': target_step_idx,
                                         'cost': cost,
-                                        'buy_date': date
+                                        'buy_date': date,
+                                        'entry_type': 'FORCE'
                                     })
                                     self.step_active_flags[target_step_idx] = True
                                     self.last_buy_date = date # Reset Idle Timer
@@ -407,6 +413,10 @@ class Backtester:
                                         "StepIdx": target_step_idx,
                                         "DropPct": 0 # Ignore drop
                                     })
+                                    
+                                    # Record Stat
+                                    self.step_stats[target_step_idx]['FORCE']['count'] += 1
+                                    
                                     forced_buy_executed = True
 
                 # Standard Drop Logic (Skip if Forced Buy happened today)
@@ -440,7 +450,7 @@ class Backtester:
                             # Record Buy Count
                             
                             # Record Buy Count
-                            self.step_buy_counts[i] = self.step_buy_counts.get(i, 0) + 1
+                            self.step_stats[i]['DROP']['count'] += 1
                             
                             # Sell Base
                             shares_to_sell = shift_val / base_price
@@ -462,7 +472,8 @@ class Backtester:
                                     'price': buy_price,
                                     'step_idx': i,
                                     'cost': cost,
-                                    'buy_date': date
+                                    'buy_date': date,
+                                    'entry_type': 'DROP'
                                 })
                                 self.step_active_flags[i] = True
                                 
@@ -580,14 +591,20 @@ class Backtester:
         # Build Step Stats String
         step_stats_str = ""
         for i, step in enumerate(self.steps):
-            count = self.step_buy_counts.get(i, 0)
-            profits = self.step_profits.get(i, [])
-            avg_prof = sum(profits)/len(profits) if profits else 0.0
+            stats = self.step_stats.get(i, {'DROP':{'count':0,'profits':[]}, 'FORCE':{'count':0,'profits':[]}})
+            d_count = stats['DROP']['count']
+            f_count = stats['FORCE']['count']
+            
+            d_profits = stats['DROP']['profits']
+            f_profits = stats['FORCE']['profits']
+            
+            d_avg = sum(d_profits)/len(d_profits) if d_profits else 0.0
+            f_avg = sum(f_profits)/len(f_profits) if f_profits else 0.0
             
             step_stats_str += (
                 f"\n[Step {i+1} | Drop {step['drop_pct']}%]\n"
-                f"  - Buys: {count} times\n"
-                f"  - Avg Profit: {avg_prof:.2f}% (Count: {len(profits)})\n"
+                f"  - Buys: Drop({d_count}) / Force({f_count})\n"
+                f"  - Avg Profit: Drop({d_avg:.2f}%) / Force({f_avg:.2f}%)\n"
             )
 
         # CAGR Calculation
@@ -801,30 +818,44 @@ class Backtester:
         """
         rows = []
         # Calculate total profit across all steps for contribution logic
-        total_strategy_profit = sum([sum(amts) for amts in self.step_profit_amounts.values()])
+        # Need to sum amounts from both DROP and FORCE
+        total_strategy_profit = 0
+        for s_stat in self.step_stats.values():
+            total_strategy_profit += sum(s_stat['DROP']['amts']) + sum(s_stat['FORCE']['amts'])
         
         for i, step in enumerate(self.steps):
-            buy_count = self.step_buy_counts.get(i, 0)
-            profits = self.step_profits.get(i, [])
-            profit_amts = self.step_profit_amounts.get(i, [])
-            sell_count = len(profits)
+            stats = self.step_stats.get(i, {'DROP':{'count':0,'profits':[],'amts':[]}, 'FORCE':{'count':0,'profits':[],'amts':[]}})
             
-            avg_prof = sum(profits)/sell_count if sell_count > 0 else 0.0
+            d_count = stats['DROP']['count']
+            f_count = stats['FORCE']['count']
+            
+            d_profits = stats['DROP']['profits']
+            f_profits = stats['FORCE']['profits']
+            
+            d_amts = stats['DROP']['amts']
+            f_amts = stats['FORCE']['amts']
+            
+            d_avg = sum(d_profits)/len(d_profits) if d_profits else 0.0
+            f_avg = sum(f_profits)/len(f_profits) if f_profits else 0.0
             
             # Absolute Profit Contribution
-            step_total_profit_amt = sum(profit_amts)
+            step_total_profit_amt = sum(d_amts) + sum(f_amts)
             
             contribution_pct = 0.0
             if total_strategy_profit > 0:
                 contribution_pct = (step_total_profit_amt / total_strategy_profit) * 100
+            
+            # Formatting
+            buy_count_str = f"{d_count} / {f_count}"
+            avg_prof_str = f"{d_avg:.2f}% / {f_avg:.2f}%"
             
             rows.append({
                 "Step": f"Step {i+1}",
                 "Drop Condition": f"{step['drop_pct']}%",
                 "Buy Ratio": f"{step['shift_pct']}%",
                 "Target Profit": f"{step['profit_pct']}%",
-                "Buy Count": buy_count,
-                "Avg Profit": f"{avg_prof:.2f}%",
+                "Buy Count (Drop/Force)": buy_count_str,
+                "Avg Profit (Drop/Force)": avg_prof_str,
                 "Total Profit ($)": f"${step_total_profit_amt:,.0f}",
                 "Contribution": f"{contribution_pct:.1f}%"
             })
